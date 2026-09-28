@@ -232,33 +232,86 @@ function qnb_parse_gateway_response(string $raw): array
     return $parsed;
 }
 
-function qnb_gateway_post(string $url, array $fields): array
+function qnb_bank_location(string $location): string
 {
-    $body = http_build_query($fields);
+    $location = trim($location);
+    if ($location === '') {
+        return '';
+    }
+    $parts = parse_url($location);
+    if (!is_array($parts) || ($parts['scheme'] ?? '') !== 'https') {
+        return '';
+    }
+    $host = strtolower((string) ($parts['host'] ?? ''));
+    if (!in_array($host, ['vpos.qnb.com.tr', 'vpostest.qnb.com.tr'], true)) {
+        return '';
+    }
+    return $location;
+}
+
+function qnb_body_relays_credentials(string $body): bool
+{
+    return (bool) preg_match('/name=["\'](?:UserPass|UserCode|MerchantPass|Hash)["\']/i', $body);
+}
+
+function qnb_gateway_exchange(string $url, array $fields): array
+{
+    $empty = ['ok' => false, 'error' => '', 'status' => 0, 'location' => '', 'body' => ''];
     $ch = curl_init($url);
     if ($ch === false) {
-        return ['ok' => false, 'error' => 'curl başlatılamadı', 'raw' => ''];
+        $empty['error'] = 'curl başlatılamadı';
+        return $empty;
     }
 
     curl_setopt_array($ch, [
         CURLOPT_POST => true,
-        CURLOPT_POSTFIELDS => $body,
+        CURLOPT_POSTFIELDS => http_build_query($fields),
         CURLOPT_RETURNTRANSFER => true,
-        CURLOPT_TIMEOUT => 90,
+        CURLOPT_HEADER => true,
+        CURLOPT_FOLLOWLOCATION => false,
+        CURLOPT_CONNECTTIMEOUT => 12,
+        CURLOPT_TIMEOUT => 45,
         CURLOPT_SSL_VERIFYHOST => 2,
         CURLOPT_SSL_VERIFYPEER => true,
         CURLOPT_SSLVERSION => CURL_SSLVERSION_TLSv1_2,
+        CURLOPT_HTTPHEADER => ['Expect:'],
     ]);
 
     $result = curl_exec($ch);
     $error = curl_error($ch);
+    $status = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $headerSize = (int) curl_getinfo($ch, CURLINFO_HEADER_SIZE);
     curl_close($ch);
 
     if ($result === false) {
-        return ['ok' => false, 'error' => $error !== '' ? $error : 'İstek başarısız', 'raw' => ''];
+        $empty['error'] = $error !== '' ? $error : 'İstek başarısız';
+        $empty['status'] = $status;
+        return $empty;
     }
 
-    return ['ok' => true, 'error' => '', 'raw' => $result];
+    $header = substr($result, 0, $headerSize);
+    $location = '';
+    if (preg_match_all('/^Location:\s*(\S+)/mi', $header, $matches)) {
+        $location = trim((string) end($matches[1]));
+    }
+
+    return [
+        'ok' => true,
+        'error' => '',
+        'status' => $status,
+        'location' => $location,
+        'body' => substr($result, $headerSize),
+    ];
+}
+
+function qnb_gateway_post(string $url, array $fields): array
+{
+    $exchange = qnb_gateway_exchange($url, $fields);
+    if (!$exchange['ok']) {
+        return ['ok' => false, 'error' => $exchange['error'], 'raw' => ''];
+    }
+
+    return ['ok' => true, 'error' => '', 'raw' => $exchange['body']];
 }
 
 function qnb_clear_context(string $orderId): void

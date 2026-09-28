@@ -25,7 +25,7 @@ $defaults = [
 
 $values = $defaults;
 $errors = [];
-$redirect = null;
+$direct = null;
 $isPost = ($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST';
 
 if (!$isPost) {
@@ -137,14 +137,35 @@ if (!$isPost) {
             $fields['Cvv2'] = $values['cvv'];
         }
 
-        $redirect = [
-            'action' => qnb_gateway($env, $mode),
-            'fields' => $fields,
-            'mode' => $mode,
-            'env' => $env,
-            'orderId' => $values['orderId'],
-            'amount' => $amount,
-        ];
+        $exchange = qnb_gateway_exchange(qnb_gateway($env, $mode), $fields);
+        if (!$exchange['ok']) {
+            $errors[] = 'Sunucu bankaya bağlanamadı. ' . $exchange['error'];
+        } else {
+            $location = qnb_bank_location($exchange['location']);
+            if ($location !== '') {
+                header('Location: ' . $location);
+                exit;
+            }
+            $body = $exchange['body'];
+            if ($body !== '' && (stripos($body, '<form') !== false || stripos($body, '<html') !== false)) {
+                if (qnb_body_relays_credentials($body)) {
+                    $errors[] = 'Banka cevabı üye işyeri bilgisini tarayıcıya geri yazıyor. İstek iletilmedi.';
+                } else {
+                    header('Content-Type: text/html; charset=UTF-8');
+                    echo $body;
+                    exit;
+                }
+            } else {
+                $parsed = qnb_parse_gateway_response($body);
+                $direct = [
+                    'orderId' => $values['orderId'],
+                    'amount' => $amount,
+                    'status' => $exchange['status'],
+                    'fields' => $parsed,
+                    'raw' => $parsed === [] ? $body : '',
+                ];
+            }
+        }
     }
 }
 
@@ -177,26 +198,25 @@ header('Content-Type: text/html; charset=UTF-8');
 <body>
 <div class="wrap">
     <div class="card">
-<?php if ($redirect !== null): ?>
-        <h1>Bankaya yönlendiriliyor</h1>
-        <p><?= $redirect['mode'] === '3dhost' ? '3DHost' : '3DPay' ?> · <?= $redirect['env'] === 'live' ? 'Canlı' : 'Test' ?></p>
-        <p>Sipariş <strong><?= qnb_h($redirect['orderId']) ?></strong>, tutar <strong><?= qnb_h($redirect['amount']) ?></strong></p>
-        <p class="muted">Gateway: <code><?= qnb_h($redirect['action']) ?></code></p>
-        <form id="qnb-gateway" method="post" action="<?= qnb_h($redirect['action']) ?>">
-<?php foreach ($redirect['fields'] as $name => $value): ?>
-            <input type="hidden" name="<?= qnb_h($name) ?>" value="<?= qnb_h($value) ?>">
+<?php if ($direct !== null): ?>
+        <h1>Banka cevabı</h1>
+        <p>Sipariş <strong><?= qnb_h($direct['orderId']) ?></strong>, tutar <strong><?= qnb_h($direct['amount']) ?></strong></p>
+        <p class="muted">HTTP <?= qnb_h((string) $direct['status']) ?>. İstek sunucudan gitti.</p>
+<?php if ($direct['fields'] !== []): ?>
+        <table>
+<?php foreach ($direct['fields'] as $name => $value): ?>
+            <tr><th><?= qnb_h((string) $name) ?></th><td><?= qnb_h((string) $value) ?></td></tr>
 <?php endforeach; ?>
-            <button type="submit">Gönder</button>
-            <a class="btn secondary" href="index.php">Vazgeç</a>
-        </form>
-        <script>
-            setTimeout(function () {
-                document.getElementById('qnb-gateway').submit();
-            }, 1200);
-        </script>
+        </table>
+<?php elseif ($direct['raw'] !== ''): ?>
+        <pre><?= qnb_h($direct['raw']) ?></pre>
+<?php else: ?>
+        <p>Banka boş cevap döndü.</p>
+<?php endif; ?>
+        <p><a class="btn secondary" href="index.php">Geri</a></p>
 <?php else: ?>
         <h1>QNB Sanal POS Test</h1>
-        <p class="muted">3DPay kart bilgisini burada alır. 3DHost kartı banka sayfasında alır. Test ve canlı yalnızca gateway adresini değiştirir. <a href="refund.php">İade</a></p>
+        <p class="muted">Ödeme isteğini bu sunucu bankaya gönderir. Kart doğrulama sayfası bankada açılır. <a href="refund.php">İade</a></p>
 <?php if ($errors !== []): ?>
         <div class="errors">
             <ul>
